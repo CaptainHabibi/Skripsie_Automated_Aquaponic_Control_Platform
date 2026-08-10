@@ -28,6 +28,9 @@
 
 #include "usbd_cdc_if.h"
 #include <stdio.h>
+#include "tempSensor.h"
+#include "waterSensor.h"
+
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -63,17 +66,24 @@ const osThreadAttr_t ActuatorTask_attributes = {
   .stack_size = 256 * 4,
   .priority = (osPriority_t) osPriorityHigh,
 };
-/* Definitions for CommTask */
-osThreadId_t CommTaskHandle;
-const osThreadAttr_t CommTask_attributes = {
-  .name = "CommTask",
+/* Definitions for Comms */
+osThreadId_t CommsHandle;
+const osThreadAttr_t Comms_attributes = {
+  .name = "Comms",
   .stack_size = 512 * 4,
   .priority = (osPriority_t) osPriorityAboveNormal,
 };
-/* Definitions for SensorTask */
-osThreadId_t SensorTaskHandle;
-const osThreadAttr_t SensorTask_attributes = {
-  .name = "SensorTask",
+/* Definitions for TempSensor */
+osThreadId_t TempSensorHandle;
+const osThreadAttr_t TempSensor_attributes = {
+  .name = "TempSensor",
+  .stack_size = 256 * 4,
+  .priority = (osPriority_t) osPriorityNormal,
+};
+/* Definitions for WaterLvlSensor */
+osThreadId_t WaterLvlSensorHandle;
+const osThreadAttr_t WaterLvlSensor_attributes = {
+  .name = "WaterLvlSensor",
   .stack_size = 256 * 4,
   .priority = (osPriority_t) osPriorityNormal,
 };
@@ -96,8 +106,9 @@ float Read_Temperature(void);
 
 void StartDefaultTask(void *argument);
 void StartActuatorTask(void *argument);
-void StartCommTask(void *argument);
-void StartSensorTask(void *argument);
+void StartComms(void *argument);
+void StartTempSensor(void *argument);
+void StartWaterLvlSensor(void *argument);
 
 extern void MX_USB_DEVICE_Init(void);
 void MX_FREERTOS_Init(void); /* (MISRA C 2004 rule 8.1) */
@@ -139,11 +150,14 @@ void MX_FREERTOS_Init(void) {
   /* creation of ActuatorTask */
   ActuatorTaskHandle = osThreadNew(StartActuatorTask, NULL, &ActuatorTask_attributes);
 
-  /* creation of CommTask */
-  CommTaskHandle = osThreadNew(StartCommTask, NULL, &CommTask_attributes);
+  /* creation of Comms */
+  CommsHandle = osThreadNew(StartComms, NULL, &Comms_attributes);
 
-  /* creation of SensorTask */
-  SensorTaskHandle = osThreadNew(StartSensorTask, NULL, &SensorTask_attributes);
+  /* creation of TempSensor */
+  TempSensorHandle = osThreadNew(StartTempSensor, NULL, &TempSensor_attributes);
+
+  /* creation of WaterLvlSensor */
+  WaterLvlSensorHandle = osThreadNew(StartWaterLvlSensor, NULL, &WaterLvlSensor_attributes);
 
   /* USER CODE BEGIN RTOS_THREADS */
   /* add threads, ... */
@@ -170,8 +184,12 @@ void StartDefaultTask(void *argument)
   /* Infinite loop */
   for(;;)
   {
-	  HAL_GPIO_TogglePin(GPIOC, GPIO_PIN_13);
-    osDelay(500);
+	  HAL_GPIO_TogglePin(GPIOC, ledPin_Pin);
+    osDelay(200);
+    HAL_GPIO_TogglePin(GPIOC, ledPin_Pin);
+        osDelay(200);
+        HAL_GPIO_TogglePin(GPIOC, ledPin_Pin);
+                osDelay(500);
   }
   /* USER CODE END StartDefaultTask */
 }
@@ -194,34 +212,34 @@ void StartActuatorTask(void *argument)
   /* USER CODE END StartActuatorTask */
 }
 
-/* USER CODE BEGIN Header_StartCommTask */
+/* USER CODE BEGIN Header_StartComms */
 /**
-* @brief Function implementing the CommTask thread.
+* @brief Function implementing the Comms thread.
 * @param argument: Not used
 * @retval None
 */
-/* USER CODE END Header_StartCommTask */
-void StartCommTask(void *argument)
+/* USER CODE END Header_StartComms */
+void StartComms(void *argument)
 {
-  /* USER CODE BEGIN StartCommTask */
+  /* USER CODE BEGIN StartComms */
   /* Infinite loop */
   for(;;)
   {
     osDelay(1);
   }
-  /* USER CODE END StartCommTask */
+  /* USER CODE END StartComms */
 }
 
-/* USER CODE BEGIN Header_StartSensorTask */
+/* USER CODE BEGIN Header_StartTempSensor */
 /**
-* @brief Function implementing the SensorTask thread.
+* @brief Function implementing the TempSensor thread.
 * @param argument: Not used
 * @retval None
 */
-/* USER CODE END Header_StartSensorTask */
-void StartSensorTask(void *argument)
+/* USER CODE END Header_StartTempSensor */
+void StartTempSensor(void *argument)
 {
-  /* USER CODE BEGIN StartSensorTask */
+  /* USER CODE BEGIN StartTempSensor */
 	char buffer[48];
 	  float temp;
   /* Infinite loop */
@@ -230,100 +248,48 @@ void StartSensorTask(void *argument)
 	  temp = Read_Temperature();
 
 	      if (temp <= -900.0f) {
-	        sprintf(buffer, "Error: DS18B20 Not Responding\r\n");
+	        sprintf(buffer, "Temp: ERROR\r\n");
 	      } else {
-	        sprintf(buffer, "Temperature: %.2f C\r\n", temp);
+	        sprintf(buffer, "Temp: %.2f C\r\n", temp);
 	      }
 
 	      CDC_Transmit_FS((uint8_t*)buffer, strlen(buffer));
-	      osDelay(1000);
+	      osDelay(2000); // Give the 750ms conversion plenty of breathing room
   }
-  /* USER CODE END StartSensorTask */
+  /* USER CODE END StartTempSensor */
+}
+
+/* USER CODE BEGIN Header_StartWaterLvlSensor */
+/**
+* @brief Function implementing the WaterLvlSensor thread.
+* @param argument: Not used
+* @retval None
+*/
+/* USER CODE END Header_StartWaterLvlSensor */
+void StartWaterLvlSensor(void *argument)
+{
+  /* USER CODE BEGIN StartWaterLvlSensor */
+	char buffer[48];
+	  float water_level;
+  /* Infinite loop */
+  for(;;)
+  {
+	  water_level = Read_Water_Level_CM();
+
+	      if (water_level < 0.0f) {
+	        sprintf(buffer, "Water Level: TIMEOUT\r\n");
+	      } else {
+	        sprintf(buffer, "Water Level: %.1f cm\r\n", water_level);
+	      }
+
+	      CDC_Transmit_FS((uint8_t*)buffer, strlen(buffer));
+	      osDelay(500);
+  }
+  /* USER CODE END StartWaterLvlSensor */
 }
 
 /* Private application code --------------------------------------------------*/
 /* USER CODE BEGIN Application */
-void delay_us(uint16_t us) {
-    __HAL_TIM_SET_COUNTER(&htim2, 0);
-    while ((uint16_t)__HAL_TIM_GET_COUNTER(&htim2) < us);
-}
 
-uint8_t DS18B20_Init_Raw(void) {
-    uint8_t i;
-    HAL_GPIO_WritePin(GPIOA, GPIO_PIN_1, GPIO_PIN_RESET);
-    delay_us(480);
-    HAL_GPIO_WritePin(GPIOA, GPIO_PIN_1, GPIO_PIN_SET);
-    delay_us(70);
-    i = HAL_GPIO_ReadPin(GPIOA, GPIO_PIN_1);
-    delay_us(410);
-    return i; // Returns 0 if sensor is present
-}
-
-void DS18B20_Write_Byte(uint8_t dat) {
-    for (uint8_t i = 0; i < 8; i++) {
-        if ((dat & (1 << i)) != 0) {
-            HAL_GPIO_WritePin(GPIOA, GPIO_PIN_1, GPIO_PIN_RESET);
-            delay_us(1);
-            HAL_GPIO_WritePin(GPIOA, GPIO_PIN_1, GPIO_PIN_SET);
-            delay_us(60);
-        } else {
-            HAL_GPIO_WritePin(GPIOA, GPIO_PIN_1, GPIO_PIN_RESET);
-            delay_us(60);
-            HAL_GPIO_WritePin(GPIOA, GPIO_PIN_1, GPIO_PIN_SET);
-            delay_us(1);
-        }
-    }
-}
-
-uint8_t DS18B20_Read_Byte(void) {
-    uint8_t dat = 0;
-    for (uint8_t i = 0; i < 8; i++) {
-        HAL_GPIO_WritePin(GPIOA, GPIO_PIN_1, GPIO_PIN_RESET);
-        delay_us(2);
-        HAL_GPIO_WritePin(GPIOA, GPIO_PIN_1, GPIO_PIN_SET);
-        delay_us(10);
-        if (HAL_GPIO_ReadPin(GPIOA, GPIO_PIN_1)) {
-            dat |= (1 << i);
-        }
-        delay_us(50);
-    }
-    return dat;
-}
-
-float Read_Temperature(void) {
-    uint8_t Presence, MSB, LSB;
-    int16_t raw_temperature;
-
-    // Freeze ALL interrupts so FreeRTOS cannot disrupt microsecond timing
-    __disable_irq();
-
-    if (DS18B20_Init_Raw() != 0) {
-        __enable_irq();
-        return -999.0f; // Sensor error flag
-    }
-
-    DS18B20_Write_Byte(0xCC); // Skip ROM
-    DS18B20_Write_Byte(0x44); // Convert T
-
-    __enable_irq(); // Unfreeze interrupts during the 750ms sensor wait
-
-    osDelay(750); // Sensor internal conversion time
-
-    __disable_irq(); // Re-freeze for reading data
-    if (DS18B20_Init_Raw() != 0) {
-        __enable_irq();
-        return -999.0f;
-    }
-
-    DS18B20_Write_Byte(0xCC); // Skip ROM
-    DS18B20_Write_Byte(0xBE); // Read Scratchpad
-    LSB = DS18B20_Read_Byte();
-    MSB = DS18B20_Read_Byte();
-
-    __enable_irq(); // Done reading, restore normal OS operation
-
-    raw_temperature = ((MSB << 8) | LSB);
-    return (float)raw_temperature * 0.0625f;
-}
 /* USER CODE END Application */
 
