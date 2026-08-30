@@ -34,7 +34,9 @@
 #include "PHSensor.h"
 #include "ECSensor.h"
 #include "turbiditySensor.h"
-
+#include "usart.h"     // Provides huart1 definition and UART HAL types
+#include "LoRa.h"
+#include "Esp32.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -56,6 +58,7 @@
 /* USER CODE BEGIN Variables */
 extern TIM_HandleTypeDef htim2; // Brings in TIM2 from main.c
 extern ADC_HandleTypeDef hadc1;
+extern UART_HandleTypeDef huart1;
 /* USER CODE END Variables */
 /* Definitions for defaultTask */
 osThreadId_t defaultTaskHandle;
@@ -104,7 +107,21 @@ osThreadId_t ThermalTaskHandle;
 const osThreadAttr_t ThermalTask_attributes = {
   .name = "ThermalTask",
   .stack_size = 256 * 4,
-  .priority = (osPriority_t) osPriorityHigh,
+  .priority = (osPriority_t) osPriorityNormal,
+};
+/* Definitions for Comms */
+osThreadId_t CommsHandle;
+const osThreadAttr_t Comms_attributes = {
+  .name = "Comms",
+  .stack_size = 512 * 4,
+  .priority = (osPriority_t) osPriorityNormal,
+};
+/* Definitions for Servo */
+osThreadId_t ServoHandle;
+const osThreadAttr_t Servo_attributes = {
+  .name = "Servo",
+  .stack_size = 256 * 4,
+  .priority = (osPriority_t) osPriorityNormal,
 };
 /* Definitions for SensorDataQueue */
 osMessageQueueId_t SensorDataQueueHandle;
@@ -135,6 +152,8 @@ void StartPHSensorTask(void *argument);
 void StartECSensorTask(void *argument);
 void StartTurbiditySensorTask(void *argument);
 void StartThermalTaskTask(void *argument);
+void StartCommsTask(void *argument);
+void StartServoTask(void *argument);
 
 extern void MX_USB_DEVICE_Init(void);
 void MX_FREERTOS_Init(void); /* (MISRA C 2004 rule 8.1) */
@@ -163,7 +182,7 @@ void MX_FREERTOS_Init(void) {
 
   /* Create the queue(s) */
   /* creation of SensorDataQueue */
-  SensorDataQueueHandle = osMessageQueueNew (16, sizeof(uint16_t), &SensorDataQueue_attributes);
+  SensorDataQueueHandle = osMessageQueueNew (16, 12, &SensorDataQueue_attributes);
 
   /* creation of TempQueue */
   TempQueueHandle = osMessageQueueNew (16, sizeof(uint32_t), &TempQueue_attributes);
@@ -194,6 +213,12 @@ void MX_FREERTOS_Init(void) {
   /* creation of ThermalTask */
   ThermalTaskHandle = osThreadNew(StartThermalTaskTask, NULL, &ThermalTask_attributes);
 
+  /* creation of Comms */
+  CommsHandle = osThreadNew(StartCommsTask, NULL, &Comms_attributes);
+
+  /* creation of Servo */
+  ServoHandle = osThreadNew(StartServoTask, NULL, &Servo_attributes);
+
   /* USER CODE BEGIN RTOS_THREADS */
   /* add threads, ... */
   /* USER CODE END RTOS_THREADS */
@@ -216,34 +241,21 @@ void StartDefaultTask(void *argument)
   /* init code for USB_DEVICE */
   MX_USB_DEVICE_Init();
   /* USER CODE BEGIN StartDefaultTask */
-  int BattPower = 0 ;
-  char buffer[48];
+
   /* Infinite loop */
   for(;;)
   {
-	  BattPower = HAL_GPIO_ReadPin(PowerCheck_GPIO_Port, PowerCheck_Pin); //Read Pin to check if mains is active
-	  if(BattPower == 1){
-		  HAL_GPIO_TogglePin(GPIOC, ledPin_Pin);
-		      osDelay(200);
+
 		      HAL_GPIO_TogglePin(GPIOC, ledPin_Pin);
 		          osDelay(200);
 		          HAL_GPIO_TogglePin(GPIOC, ledPin_Pin);
 		                  osDelay(500);
-		                  sprintf(buffer, "Power Status: Mains\r\n");
-	  }
-	  else if(BattPower == 0){
-		  HAL_GPIO_TogglePin(GPIOC, ledPin_Pin);
-		  		      osDelay(200);
-		  		      HAL_GPIO_TogglePin(GPIOC, ledPin_Pin);
-		  		          osDelay(200);
-		  		        sprintf(buffer, "Power Status: BATTERY\r\n");
-	  }
+
          //      HAL_GPIO_WritePin(Pump_PWM_GPIO_Port, Pump_PWM_Pin, 1);
             //   osDelay(500);
                //HAL_GPIO_WritePin(Pump_PWM_GPIO_Port, Pump_PWM_Pin, 0);
                //osDelay(4000);
-	  CDC_Transmit_FS((uint8_t*)buffer, strlen(buffer));
-	  		      osDelay(1000);
+
 
   }
 
@@ -260,24 +272,26 @@ void StartDefaultTask(void *argument)
 void StartTempSensorTask(void *argument)
 {
   /* USER CODE BEGIN StartTempSensorTask */
-	char buffer[48];
-		  float temp;
+	SensorMsg_t msg;
+	  msg.type = SENSOR_TYPE_TEMP;
+	  float current_temp = 0.0f;
 	  /* Infinite loop */
 	  for(;;)
 	  {
-		  temp = Read_Temperature(); //[cite: 1]
+		  current_temp = Read_Temperature(); // From tempSensor.h
 
-		      // Drop the temperature ticket onto the queue rail (Timeout = 0)
-		      osMessageQueuePut(TempQueueHandle, &temp, 0, 0);
+		      if (current_temp > -900.0f)
+		      {
+		        // 1. Post to Thermal Control Task mailbox (for Relay control)
+		        osMessageQueuePut(TempQueueHandle, &current_temp, 0, 0);
 
-		      if (temp <= -900.0f) { //[cite: 1]
-		        sprintf(buffer, "Temp: ERROR\r\n");
-		      } else {
-		        sprintf(buffer, "Temp: %.2f C\r\n", temp);
+		        // 2. Post to Central Telemetry Queue (for USB CDC & LoRa)
+		        msg.value = current_temp;
+		        msg.timestamp = xTaskGetTickCount();
+		        osMessageQueuePut(SensorDataQueueHandle, &msg, 0, 0);
 		      }
 
-		      CDC_Transmit_FS((uint8_t*)buffer, strlen(buffer)); //[cite: 1]
-		      osDelay(2000); //[cite: 1]
+		      osDelay(2000); // 2-second cycle
 	  }
   /* USER CODE END StartTempSensorTask */
 }
@@ -293,21 +307,17 @@ void StartWaterLvlSensorTask(void *argument)
 {
   /* USER CODE BEGIN StartWaterLvlSensorTask */
   /* Infinite loop */
-	char buffer[48];
-		  float water_level;
+	SensorMsg_t msg;
+	  msg.type = SENSOR_TYPE_WATER_LVL;
 	  /* Infinite loop */
 	  for(;;)
 	  {
-		  water_level = Read_Water_Level_CM();
+		  msg.value = Read_Water_Level_CM(); // From waterSensor.h
+		      msg.timestamp = xTaskGetTickCount();
 
-		      if (water_level < 0.0f) {
-		        sprintf(buffer, "Water Level: TIMEOUT\r\n");
-		      } else {
-		        sprintf(buffer, "Water Level: %.1f cm\r\n", water_level);
-		      }
+		      osMessageQueuePut(SensorDataQueueHandle, &msg, 0, 0);
 
-		      CDC_Transmit_FS((uint8_t*)buffer, strlen(buffer));
-		      osDelay(500);
+		      osDelay(1000); // Sample water level every 1s
 	  }
 
   /* USER CODE END StartWaterLvlSensorTask */
@@ -324,29 +334,21 @@ void StartPHSensorTask(void *argument)
 {
   /* USER CODE BEGIN StartPHSensorTask */
 	// Initialization
-	pH_Sensor_Init();
+	SensorMsg_t msg;
+	  msg.type = SENSOR_TYPE_PH;
+	  pH_Sensor_Init();
+
 
 	  for(;;)
 	  {
-	    float current_ph = pH_Sensor_Read(&hadc1);
-
-	    // Create a string buffer to send over USB CDC / UART
-	    char buffer[64];
-	    int len = 0;
-
-	    if (current_ph >= 0.0f)
-	    {
-	        len = snprintf(buffer, sizeof(buffer), "pH: %.2f\r\n", current_ph);
-	    }
-	    else
-	    {
-	        len = snprintf(buffer, sizeof(buffer), "pH: ERROR\r\n");
-	    }
-
-	    // Send data (e.g., via USB CDC virtual COM port)
-	    CDC_Transmit_FS((uint8_t*)buffer, len);
-
-	    osDelay(1000);
+		  float val = pH_Sensor_Read(&hadc1);
+		      if (val >= 0.0f)
+		      {
+		        msg.value = val;
+		        msg.timestamp = xTaskGetTickCount();
+		        osMessageQueuePut(SensorDataQueueHandle, &msg, 0, 0);
+		      }
+		      osDelay(2000);
 	  }
   /* USER CODE END StartPHSensorTask */
 }
@@ -361,25 +363,19 @@ void StartPHSensorTask(void *argument)
 void StartECSensorTask(void *argument)
 {
   /* USER CODE BEGIN StartECSensorTask */
-	EC_Sensor_Init();
-
+	SensorMsg_t msg;
+	  msg.type = SENSOR_TYPE_EC;
+	  EC_Sensor_Init();
 	  for(;;)
 	  {
-	    float current_ec = EC_Sensor_Read(&hadc1);
-	    char buffer[64];
-	    int len = 0;
-
-	    if (current_ec >= 0.0f)
-	    {
-	        len = snprintf(buffer, sizeof(buffer), "EC: %.2f mS/cm\r\n", current_ec);
-	    }
-	    else
-	    {
-	        len = snprintf(buffer, sizeof(buffer), "EC: ERROR\r\n");
-	    }
-
-	    CDC_Transmit_FS((uint8_t*)buffer, len);
-	    osDelay(1000);
+		  float val = EC_Sensor_Read(&hadc1);
+		      if (val >= 0.0f)
+		      {
+		        msg.value = val;
+		        msg.timestamp = xTaskGetTickCount();
+		        osMessageQueuePut(SensorDataQueueHandle, &msg, 0, 0);
+		      }
+		      osDelay(2000);
 	  }
   /* USER CODE END StartECSensorTask */
 }
@@ -394,41 +390,23 @@ void StartECSensorTask(void *argument)
 void StartTurbiditySensorTask(void *argument)
 {
   /* USER CODE BEGIN StartTurbiditySensorTask */
+	SensorMsg_t msg;
+	  msg.type = SENSOR_TYPE_TURBIDITY;
   /* Infinite loop */
 	for(;;)
 	  {
-	    // 1. Get the stepped-down 0-3.3V reading from your sensor driver
-	    float adc_voltage = Read_Turbidity_Voltage(); //[cite: 1, 2]
+		float adc_voltage = Read_Turbidity_Voltage();
+		    if (adc_voltage >= 0.0f)
+		    {
+		      float sensor_voltage = adc_voltage * 1.47f;
+		      float ntu = (-1120.4f * sensor_voltage * sensor_voltage) + (5742.3f * sensor_voltage) - 4352.9f;
+		      if (ntu < 0.0f) ntu = 0.0f;
 
-	    // 2. Reverse your E12 resistor voltage divider (10k & 4.7k) to get true sensor voltage
-	    // V_sensor = V_adc * ((10000 + 4700) / 10000)
-	    float sensor_voltage = adc_voltage * 1.47f;
-
-	    // 3. Apply the DFRobot official voltage-to-NTU mapping curve[cite: 5]
-	    float ntu_value = (-1120.4f * sensor_voltage * sensor_voltage) + (5742.3f * sensor_voltage) - 4352.9f; //[cite: 5]
-
-	    // 4. Clamp negative values (clean water can sometimes dip slightly below 0 NTU on the curve)
-	    if (ntu_value < 0.0f) {
-	        ntu_value = 0.0f;
-	    }
-
-	    char buffer[64];
-	    int len = 0;
-
-	    if (adc_voltage >= 0.0f)
-	    {
-	        len = snprintf(buffer, sizeof(buffer), "Turbidity: %.2f NTU\r\n", ntu_value);
-	    }
-	    else
-	    {
-	        len = snprintf(buffer, sizeof(buffer), "Turbidity: ERROR\r\n");
-	    }
-
-	    // Send data over serial monitor
-	    CDC_Transmit_FS((uint8_t*)buffer, len);
-
-	    // Run every 2 seconds
-	    osDelay(2000);
+		      msg.value = ntu;
+		      msg.timestamp = xTaskGetTickCount();
+		      osMessageQueuePut(SensorDataQueueHandle, &msg, 0, 0);
+		    }
+		    osDelay(2000);
 	  }
   /* USER CODE END StartTurbiditySensorTask */
 }
@@ -443,30 +421,243 @@ void StartTurbiditySensorTask(void *argument)
 void StartThermalTaskTask(void *argument)
 {
   /* USER CODE BEGIN StartThermalTaskTask */
-	float received_temp;
-	  float target_temp_Low = 21.0f;
-	  float target_temp_High = 24.0f;
+	float received_temp = 0.0f;
+	  const float target_temp_Low  = 21.0f;
+	  const float target_temp_High = 24.0f;
+	  uint8_t heater_state = 0;
   /* Infinite loop */
   for(;;)
   {
-	  // Task naturally sleeps here until a temperature arrives in the queue
-	      if (osMessageQueueGet(TempQueueHandle, &received_temp, NULL, osWaitForever) == osOK)
+	  if (osMessageQueueGet(TempQueueHandle, &received_temp, NULL, osWaitForever) == osOK)
 	      {
-	        // Ignore sensor errors to prevent the heater from locking ON during a fault
-	        if (received_temp > -900.0f)
+	        // 1. REJECT SENSOR ERRORS AND IMPOSSIBLE VALUES IMMEDIATELY
+	        if (received_temp < 5.0f || received_temp > 45.0f)
 	        {
-	           if (received_temp < target_temp_Low) {
-	              // Water is cold, actuate relay (Heater ON)
-	              HAL_GPIO_WritePin(HeaterRelay_GPIO_Port, HeaterRelay_Pin, 1);
-	           }
-	           else  if(received_temp>target_temp_High){
-	              // Target reached, release relay (Heater OFF)
-	              HAL_GPIO_WritePin(HeaterRelay_GPIO_Port, HeaterRelay_Pin, 0);
-	           }
+	          // Do not touch the relay pin on sensor errors!
+	          continue;
+	        }
+
+	        // 2. Strict Hysteresis Switching
+	        if (received_temp < target_temp_Low && heater_state == 0)
+	        {
+	          HAL_GPIO_WritePin(HeaterRelay_GPIO_Port, HeaterRelay_Pin, GPIO_PIN_SET);
+	          heater_state = 1;
+	        }
+	        else if (received_temp > target_temp_High && heater_state == 1)
+	        {
+	          HAL_GPIO_WritePin(HeaterRelay_GPIO_Port, HeaterRelay_Pin, GPIO_PIN_RESET);
+	          heater_state = 0;
 	        }
 	      }
   }
   /* USER CODE END StartThermalTaskTask */
+}
+
+/* USER CODE BEGIN Header_StartCommsTask */
+/**
+* @brief Function implementing the Comms thread.
+* @param argument: Not used
+* @retval None
+*/
+/* USER CODE END Header_StartCommsTask */
+void StartCommsTask(void *argument)
+{
+  /* USER CODE BEGIN StartCommsTask */
+	SensorMsg_t rx_msg;
+	  SystemTelemetry_t telemetry_cache = {
+	      .temp_c = 0.0f,
+	      .water_level_cm = 0.0f,
+	      .turbidity_ntu = 0.0f,
+	      .ph_val = 7.0f,
+	      .ec_val = 1.2f
+	  };
+
+	  uint8_t rx_token = 0;
+	    static char report_buf[512];    // 'static' keeps these off the task stack
+	    static char warnings_buf[128];
+	    uint32_t last_tx_tick = 0;
+
+	    uint8_t fish_fed_today = 0;
+	    static char last_fed_time[20] = "Never";
+	    static char fish_activity[12] = "Normal";
+	    uint8_t batt_power = 0;
+	    uint8_t lora_online = LoRa_Init();
+	    ESP32_Init();
+  /* Infinite loop */
+  for(;;)
+  {
+	  // -------------------------------------------------------------
+	      // 1. Check Power Grid State (PA7 PowerCheck pin)
+	      // -------------------------------------------------------------
+	      batt_power = (HAL_GPIO_ReadPin(PowerCheck_GPIO_Port, PowerCheck_Pin) == GPIO_PIN_RESET) ? 1 : 0;
+
+	      // -------------------------------------------------------------
+	      // 2. Process Vision Tokens from ESP32-S3 over USART1
+	      // -------------------------------------------------------------
+	      if (ESP32_ReadToken(&rx_token, 20))
+	      {
+	        switch (rx_token)
+	        {
+	          case TOKEN_HUNGRY: // 0x02
+	            snprintf(fish_activity, sizeof(fish_activity), "Hungry");
+
+	            // Wake up Servo task via FreeRTOS notification
+	                        xTaskNotify((TaskHandle_t)ServoHandle, 0x01, eSetBits);
+
+	            fish_fed_today = 1;
+	            snprintf(last_fed_time, sizeof(last_fed_time), "%lu sec ago", (xTaskGetTickCount() / 1000));
+	            snprintf(fish_activity, sizeof(fish_activity), "Feeding");
+	            break;
+
+	          case TOKEN_ANOMALY: // 0x03
+	            snprintf(fish_activity, sizeof(fish_activity), "Abnormal");
+	            break;
+
+	          case TOKEN_NORMAL: // 0x01
+	          default:
+	            snprintf(fish_activity, sizeof(fish_activity), "Normal");
+	            break;
+	        }
+	        rx_token = 0;
+	      }
+
+	      // -------------------------------------------------------------
+	      // 3. Drain and Cache Sensor Data from Queue
+	      // -------------------------------------------------------------
+	      while (osMessageQueueGet(SensorDataQueueHandle, &rx_msg, NULL, 0) == osOK)
+	      {
+	        switch (rx_msg.type)
+	        {
+	          case SENSOR_TYPE_TEMP:
+	            telemetry_cache.temp_c = rx_msg.value;
+	            break;
+	          case SENSOR_TYPE_WATER_LVL:
+	            telemetry_cache.water_level_cm = rx_msg.value;
+	            break;
+	          case SENSOR_TYPE_TURBIDITY:
+	            telemetry_cache.turbidity_ntu = rx_msg.value;
+	            break;
+	          case SENSOR_TYPE_PH:
+	            telemetry_cache.ph_val = rx_msg.value;
+	            break;
+	          case SENSOR_TYPE_EC:
+	            telemetry_cache.ec_val = rx_msg.value;
+	            break;
+	          default:
+	            break;
+	        }
+	      }
+
+	      // -------------------------------------------------------------
+	      // 4. Periodic Formatted Report Output (Every 5 seconds)
+	      // -------------------------------------------------------------
+	      if ((xTaskGetTickCount() - last_tx_tick) >= pdMS_TO_TICKS(5000))
+	      {
+	        last_tx_tick = xTaskGetTickCount();
+
+	        // Determine System Warnings
+	        warnings_buf[0] = '\0';
+	        if (batt_power == 1) {
+	          strcat(warnings_buf, "BATTERY POWER ACTIVE (Comms Offline); ");
+	        }
+	        if (telemetry_cache.water_level_cm < 10.0f && telemetry_cache.water_level_cm > 0.0f) {
+	          strcat(warnings_buf, "Low Water LVL; ");
+	        }
+	        if (telemetry_cache.temp_c <= -900.0f || telemetry_cache.temp_c > 45.0f) {
+	          strcat(warnings_buf, "CHECK Temp Sensor; ");
+	        }
+	        if (telemetry_cache.ph_val < 5.5f || telemetry_cache.ph_val > 8.5f) {
+	          strcat(warnings_buf, "CHECK pH Sensor; ");
+	        }
+	        if (telemetry_cache.ec_val < 0.2f || telemetry_cache.ec_val > 3.0f) {
+	          strcat(warnings_buf, "CHECK EC Sensor; ");
+	        }
+	        if (telemetry_cache.turbidity_ntu > 100.0f) {
+	          strcat(warnings_buf, "CHECK Turbidity Sensor; ");
+	        }
+	        if (strlen(warnings_buf) == 0) {
+	          strcpy(warnings_buf, "None");
+	        }
+
+	        // Build Formatted Output Dashboard String
+	        int len = snprintf(report_buf, sizeof(report_buf),
+	          "\r\n_Aquaponic_System_Info_\r\n\r\n"
+	          "PowerStatus: %s\r\n"
+	          "Warnings: %s\r\n"
+	          "___Sensors___\r\n"
+	          "Temperature: %.2f C\r\n"
+	          "WaterLvl: %.2f cm\r\n"
+	          "PH: %.2f pH\r\n"
+	          "EC: %.2f mS/cm\r\n"
+	          "Turbidity: %.2f NTU\r\n\r\n"
+	          "___Comms_Activity___\r\n"
+	          "Camera: %s\r\n"
+	          "LoRa: %s\r\n"
+	          "Fish_Activity: %s\r\n"
+	          "Fish Fed Today: %s\r\n"
+	          "Last Fed: %s\r\n"
+	          "Pumps: 60%%\r\n\r\n",
+	          (batt_power == 0) ? "Mains" : "BATTERY",
+	          warnings_buf,
+	          telemetry_cache.temp_c,
+	          telemetry_cache.water_level_cm,
+	          telemetry_cache.ph_val,
+	          telemetry_cache.ec_val,
+	          telemetry_cache.turbidity_ntu,
+	          (batt_power == 0) ? "Online" : "Sleep",
+	          (batt_power == 0) ? "Online" : "Sleep",
+	          fish_activity,
+	          (fish_fed_today == 1) ? "Yes" : "No",
+	          last_fed_time
+	        );
+
+	        // Stream to Serial USB Terminal (Fedora)
+	        CDC_Transmit_FS((uint8_t*)report_buf, len);
+
+	        // Transmit to LoRa Transceiver via SPI2
+	        // Only attempt RF broadcast if the SX1278 responded with 0x12 during init
+	        if (lora_online) {
+	            LoRa_Transmit((uint8_t*)report_buf, len);
+	        }
+	      }
+
+	      osDelay(50);
+  }
+  /* USER CODE END StartCommsTask */
+}
+
+/* USER CODE BEGIN Header_StartServoTask */
+/**
+* @brief Function implementing the Servo thread.
+* @param argument: Not used
+* @retval None
+*/
+/* USER CODE END Header_StartServoTask */
+void StartServoTask(void *argument)
+{
+  /* USER CODE BEGIN StartServoTask */
+
+	Servo_Init();
+
+	  // Set feeder to rest position (0 deg)
+	  Servo_Set_Angle(0);
+	  uint32_t notify_val = 0;
+  /* Infinite loop */
+  for(;;)
+  {
+	  // Block indefinitely until the RTC Alarm or Vision Queue triggers it (0% CPU load)
+	      xTaskNotifyWait(0x00, 0xFFFFFFFF, &notify_val, portMAX_DELAY);
+
+	      if (notify_val & 0x01){
+	  // Feeding sequence: sweep open to dispense, wait, then close
+	      Servo_Set_Angle(180);
+	      osDelay(1000); // Dispense window
+
+	      Servo_Set_Angle(0);
+
+	      }
+  }
+  /* USER CODE END StartServoTask */
 }
 
 /* Private application code --------------------------------------------------*/
