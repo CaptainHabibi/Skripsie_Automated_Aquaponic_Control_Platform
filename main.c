@@ -102,20 +102,29 @@ int main(void)
   MX_USART1_UART_Init();
   MX_RTC_Init();
   /* USER CODE BEGIN 2 */
-  HAL_TIM_Base_Start(&htim2);
-    HAL_TIM_Base_Start(&htim4);
+  HAL_TIM_Base_Start(&htim2); // TIM2 microsecond delay timebase
     MX_USB_DEVICE_Init();
-    HAL_TIM_PWM_Start(&htim3, TIM_CHANNEL_1);
+    HAL_TIM_PWM_Start(&htim3, TIM_CHANNEL_1); // Feeder Servo PWM (PA6)
+    HAL_TIM_PWM_Start(&htim4, TIM_CHANNEL_4); // Pump PWM (PB9) - CHANNEL 4!
 
-    // Arm the 24-Hour Daily RTC Alarm A directly
+    // 1. Force the RTC Current Time to 00:00:00
+    RTC_TimeTypeDef sTime = {0};
+    sTime.Hours = 0;
+    sTime.Minutes = 0;
+    sTime.Seconds = 0;
+    sTime.DayLightSaving = RTC_DAYLIGHTSAVING_NONE;
+    sTime.StoreOperation = RTC_STOREOPERATION_RESET;
+    HAL_RTC_SetTime(&hrtc, &sTime, RTC_FORMAT_BIN);
+
+    // 2. Set the Alarm to fire 5 seconds later (00:00:05)
     RTC_AlarmTypeDef sAlarm = {0};
     sAlarm.AlarmTime.Hours = 10;
     sAlarm.AlarmTime.Minutes = 0;
-    sAlarm.AlarmTime.Seconds = 0;
+    sAlarm.AlarmTime.Seconds = 0 ;
     sAlarm.AlarmTime.SubSeconds = 0;
     sAlarm.AlarmTime.DayLightSaving = RTC_DAYLIGHTSAVING_NONE;
     sAlarm.AlarmTime.StoreOperation = RTC_STOREOPERATION_RESET;
-    sAlarm.AlarmMask = RTC_ALARMMASK_DATEWEEKDAY; // Alarm repeats every day
+    sAlarm.AlarmMask = RTC_ALARMMASK_DATEWEEKDAY;
     sAlarm.AlarmSubSecondMask = RTC_ALARMSUBSECONDMASK_ALL;
     sAlarm.AlarmDateWeekDaySel = RTC_ALARMDATEWEEKDAYSEL_DATE;
     sAlarm.AlarmDateWeekDay = 1;

@@ -55,7 +55,7 @@ uint8_t LoRa_Init(void)
 
     // 3. Set Frequency to 433.0 MHz (Fx = (433000000 * 524288) / 32000000 = 0x6C8000)
     LoRa_WriteRegister(REG_FRF_MSB, 0x6C);
-    LoRa_WriteRegister(REG_FRF_MID, 0x80);
+    LoRa_WriteRegister(REG_FRF_MID, 0x40);
     LoRa_WriteRegister(REG_FRF_LSB, 0x00);
 
     // 4. Set TX Power (+17 dBm via PA_BOOST)
@@ -70,6 +70,11 @@ uint8_t LoRa_Init(void)
     // 7. AGC auto-on
     LoRa_WriteRegister(REG_MODEM_CONFIG_3, 0x04);
 
+    // =========================================================
+        // EXPLICITLY SET SYNC WORD TO 0x12 (Register 0x39)
+        // =========================================================
+        LoRa_WriteRegister(0x39, 0x12);
+
     // 8. Put in Standby mode
     LoRa_WriteRegister(REG_OP_MODE, MODE_LONG_RANGE_MODE | MODE_STDBY);
 
@@ -78,34 +83,45 @@ uint8_t LoRa_Init(void)
 
 uint8_t LoRa_Transmit(uint8_t *payload, uint8_t length)
 {
-	// Enter Standby
+	// 1. Enter Standby mode
 	    LoRa_WriteRegister(REG_OP_MODE, MODE_LONG_RANGE_MODE | MODE_STDBY);
 
-	    // Reset FIFO pointers to base address
+	    // 2. Reset FIFO pointers to base address
 	    LoRa_WriteRegister(REG_FIFO_TX_BASE_ADDR, 0x80);
 	    LoRa_WriteRegister(REG_FIFO_ADDR_PTR, 0x80);
 
-	    // Load payload buffer into FIFO
+	    // 3. Load payload buffer into FIFO
 	    for (uint8_t i = 0; i < length; i++) {
 	        LoRa_WriteRegister(REG_FIFO, payload[i]);
 	    }
 	    LoRa_WriteRegister(REG_PAYLOAD_LENGTH, length);
 
-	    // Switch to TX mode to broadcast
+	    // 4. Explicitly map DIO0 to TxDone (0x40)
+	    LoRa_WriteRegister(0x40, 0x40);
+
+	    // 5. Clear all IRQ flags before transmission
+	    LoRa_WriteRegister(REG_IRQ_FLAGS, 0xFF);
+
+	    // 6. Switch to TX mode to broadcast
 	    LoRa_WriteRegister(REG_OP_MODE, MODE_LONG_RANGE_MODE | MODE_TX);
 
-	    // Non-blocking wait: check DIO0 with osDelay yields instead of a raw spin-lock
-	    uint32_t timeout_count = 20; // 20 * 10ms = 200ms max timeout
-	    while ((LORA_READ_DIO0() == GPIO_PIN_RESET) && (timeout_count > 0)) {
-	        osDelay(10); // Yield CPU to heartbeat and sensor tasks
+	    // 7. Poll Bit 3 (TxDone = 0x08) in REG_IRQ_FLAGS with an adequate 1-second timeout
+	    uint32_t timeout_count = 100; // 100 * 10ms = 1000ms timeout
+	    while (((LoRa_ReadRegister(REG_IRQ_FLAGS) & 0x08) == 0) && (timeout_count > 0)) {
+	        osDelay(10); // Yield to other FreeRTOS tasks
 	        timeout_count--;
 	    }
 
-	    // Clear IRQ flags
+	    // 8. Clear IRQ flags and return to Standby
 	    LoRa_WriteRegister(REG_IRQ_FLAGS, 0xFF);
-
-	    // Return to Standby mode
 	    LoRa_WriteRegister(REG_OP_MODE, MODE_LONG_RANGE_MODE | MODE_STDBY);
 
 	    return (timeout_count > 0) ? 1 : 0;
+}
+
+void LoRa_Sleep(void)
+{
+    // Bit 7: 1 = LoRa Mode (MODE_LONG_RANGE_MODE)
+    // Bits 2-0: 000 = Sleep Mode (0x00)
+    LoRa_WriteRegister(REG_OP_MODE, MODE_LONG_RANGE_MODE | 0x00);
 }

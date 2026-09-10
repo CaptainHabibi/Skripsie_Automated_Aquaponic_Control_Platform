@@ -60,7 +60,7 @@ void MX_GPIO_Init(void)
   HAL_GPIO_WritePin(Trig_GPIO_Port, Trig_Pin, GPIO_PIN_RESET);
 
   /*Configure GPIO pin Output Level */
-  HAL_GPIO_WritePin(GPIOB, HeaterRelay_Pin|LoRa_CS_Pin|Pump_PWM_Pin, GPIO_PIN_RESET);
+  HAL_GPIO_WritePin(GPIOB, HeaterRelay_Pin|LoRa_CS_Pin, GPIO_PIN_RESET);
 
   /*Configure GPIO pin Output Level */
   HAL_GPIO_WritePin(LoRa_Rst_GPIO_Port, LoRa_Rst_Pin, GPIO_PIN_SET);
@@ -98,8 +98,8 @@ void MX_GPIO_Init(void)
   GPIO_InitStruct.Pull = GPIO_PULLDOWN;
   HAL_GPIO_Init(PowerCheck_GPIO_Port, &GPIO_InitStruct);
 
-  /*Configure GPIO pins : HeaterRelay_Pin LoRa_Rst_Pin Pump_PWM_Pin */
-  GPIO_InitStruct.Pin = HeaterRelay_Pin|LoRa_Rst_Pin|Pump_PWM_Pin;
+  /*Configure GPIO pins : HeaterRelay_Pin LoRa_Rst_Pin */
+  GPIO_InitStruct.Pin = HeaterRelay_Pin|LoRa_Rst_Pin;
   GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
   GPIO_InitStruct.Pull = GPIO_NOPULL;
   GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
