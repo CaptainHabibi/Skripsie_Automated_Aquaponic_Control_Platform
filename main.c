@@ -118,9 +118,9 @@ int main(void)
 
     // 2. Set the Alarm to fire 5 seconds later (00:00:05)
     RTC_AlarmTypeDef sAlarm = {0};
-    sAlarm.AlarmTime.Hours = 10;
+    sAlarm.AlarmTime.Hours = 0;
     sAlarm.AlarmTime.Minutes = 0;
-    sAlarm.AlarmTime.Seconds = 0 ;
+    sAlarm.AlarmTime.Seconds = 20;
     sAlarm.AlarmTime.SubSeconds = 0;
     sAlarm.AlarmTime.DayLightSaving = RTC_DAYLIGHTSAVING_NONE;
     sAlarm.AlarmTime.StoreOperation = RTC_STOREOPERATION_RESET;
