@@ -34,6 +34,7 @@ void setup() {
   server.on("/api/series",    handleSeries);
   server.on("/api/log.csv",   handleCsvDownload);
   server.on("/chart.js",      handleChartJs);
+  server.on("/api/latest",    handleLatest);
 
   server.on("/manual",            handleManualRoot);
   server.on("/api/mode",          handleMode);
@@ -42,6 +43,7 @@ void setup() {
   server.on("/api/feed",          handleFeed);
   server.on("/api/pump",          handlePump);
 
+
   server.onNotFound([](){ server.send(404, "text/plain", "not found"); });
   server.begin();
   Serial.println("[OK] HTTP server started");
@@ -49,6 +51,8 @@ void setup() {
 
 void loop() {
   server.handleClient();
+  linkWatchTick();
+  manualTimeoutTick();
   if (!manualMode) uplinkTick();
   delay(2);
 }

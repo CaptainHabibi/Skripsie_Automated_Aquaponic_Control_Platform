@@ -308,12 +308,11 @@ void StartCommsTask(void *argument)
     }
 
     if (lora_online && batt_power == 0) {
-      if (Downlink_Poll()) {
-        last_tx_tick = 0;
+      Downlink_Poll();
       }
-    }
 
-    if ((xTaskGetTickCount() - last_tx_tick) >= pdMS_TO_TICKS(5000))
+
+    if ((xTaskGetTickCount() - last_tx_tick) >= pdMS_TO_TICKS(1000))
     {
       last_tx_tick = xTaskGetTickCount();
       tx_status = 0;
@@ -405,18 +404,25 @@ void StartCommsTask(void *argument)
 
 void StartServoTask(void *argument)
 {
-  Servo_Init();
-  Servo_Set_Angle(0);
-  uint32_t notify_val = 0;
+	Servo_Init();
 
+	  /* Boot: 180 degrees clockwise to reference the paddle.
+	   * This runs once when the system powers up. */
+	  Servo_Rotate_For(BOOT_SPEED, BOOT_ROTATE_MS);
+	  osDelay(200);
+
+	  uint32_t notify_val = 0;
   for(;;) {
-    xTaskNotifyWait(0x00, 0xFFFFFFFF, &notify_val, portMAX_DELAY);
-    if (notify_val & 0x01) {
-      Pump_Send_Event(PUMP_EVT_FISH_FED);
-      Servo_Set_Angle(180);
-      osDelay(1000);
-      Servo_Set_Angle(0);
-    }
+	  if (xTaskNotifyWait(0x00, 0xFFFFFFFF, &notify_val, portMAX_DELAY) != pdTRUE) {
+	       continue;
+	     }
+
+	     if (notify_val & 0x01) {
+	       /* Every feed: 90 degrees clockwise. No reversal, ever. */
+	       Servo_Rotate_For(FEED_SPEED, FEED_ROTATE_MS);
+	     }
+
+	     notify_val = 0;
   }
 }
 
@@ -436,11 +442,27 @@ void StartPumpTask(void *argument)
     if (osMessageQueueGet(PumpCommandQueueHandle, &rx_event, NULL, 200) == osOK) {
       state_entry_tick = xTaskGetTickCount();
       switch (rx_event) {
-        case PUMP_EVT_FISH_FED:      current_state = PUMP_STATE_HIGH;   Pump_Set_Speed(100); in_feeding_cycle = 1; is_manual_override = 0; break;
-        case PUMP_EVT_OVERRIDE_HIGH: current_state = PUMP_STATE_HIGH;   Pump_Set_Speed(100); is_manual_override = 1; in_feeding_cycle = 0; break;
-        case PUMP_EVT_OVERRIDE_MED:  current_state = PUMP_STATE_MEDIUM; Pump_Set_Speed(80);  is_manual_override = 1; in_feeding_cycle = 0; break;
-        case PUMP_EVT_OVERRIDE_LOW:  current_state = PUMP_STATE_NORMAL; Pump_Set_Speed(60);  is_manual_override = 1; in_feeding_cycle = 0; break;
-        default: break;
+        case PUMP_EVT_FISH_FED:
+        	if (!is_manual_override) {
+        	        current_state = PUMP_STATE_HIGH;
+        	        Pump_Set_Speed(100);
+        	        in_feeding_cycle = 1;
+        	    }
+        	    break;
+        case PUMP_EVT_OVERRIDE_HIGH: current_state = PUMP_STATE_HIGH;
+				Pump_Set_Speed(100); is_manual_override = 1;
+				in_feeding_cycle = 0;
+				break;
+        case PUMP_EVT_OVERRIDE_MED:  current_state = PUMP_STATE_MEDIUM;
+				Pump_Set_Speed(80);  is_manual_override = 1;
+				in_feeding_cycle = 0;
+				break;
+        case PUMP_EVT_OVERRIDE_LOW:  current_state = PUMP_STATE_NORMAL;
+				Pump_Set_Speed(60);  is_manual_override = 1;
+				in_feeding_cycle = 0;
+				break;
+        default:
+        		break;
       }
     }
 
