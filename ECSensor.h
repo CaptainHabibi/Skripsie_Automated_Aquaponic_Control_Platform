@@ -4,6 +4,6 @@
 #include "stm32f4xx_hal.h"
 
 void EC_Sensor_Init(void);
-float EC_Sensor_Read(ADC_HandleTypeDef *hadc);
+float EC_Sensor_Read(ADC_HandleTypeDef *hadc, float temperature);
 
 #endif /* EC_SENSOR_H */

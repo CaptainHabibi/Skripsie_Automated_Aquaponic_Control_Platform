@@ -5,11 +5,11 @@ extern osMessageQueueId_t PumpCommandQueueHandle;
 #define PUMP_TIMER_ARR  9332
 void Pump_Init(void)
 {
-    HAL_TIM_PWM_Start(&htim4, TIM_CHANNEL_4);
-    Pump_Set_Speed(60); // Default to normal state (60%)
+    //HAL_TIM_PWM_Start(&htim4, TIM_CHANNEL_4);
+    Pump_Set_Speed(66); // Default to normal state (66%)
 }
 
-volatile uint8_t g_pump_speed_percent = 60;
+volatile uint8_t g_pump_speed_percent = 66;
 
 void Pump_Set_Speed(uint8_t speed_percent)
 {
@@ -18,7 +18,7 @@ void Pump_Set_Speed(uint8_t speed_percent)
         g_pump_speed_percent = 0;
         return;
     }
-    if (speed_percent < 60)  speed_percent = 60;
+    if (speed_percent < 66)  speed_percent = 66;
     if (speed_percent > 100) speed_percent = 100;
     uint32_t pulse = PUMP_TIMER_ARR - (((uint32_t)speed_percent * PUMP_TIMER_ARR) / 100);
     __HAL_TIM_SET_COMPARE(&htim4, TIM_CHANNEL_4, pulse);

@@ -35,6 +35,7 @@
 extern TIM_HandleTypeDef htim2;
 extern ADC_HandleTypeDef hadc1;
 extern UART_HandleTypeDef huart1;
+volatile float g_current_temperature = 25.0f;
 /* USER CODE END Variables */
 
 /* Task handles */
@@ -139,9 +140,11 @@ void StartTempSensorTask(void *argument)
   SensorMsg_t msg;
   msg.type = SENSOR_TYPE_TEMP;
   float current_temp = 0.0f;
+  extern volatile float g_current_temperature;
   for(;;) {
     current_temp = Read_Temperature();
     if (current_temp > -900.0f) {
+    	g_current_temperature = current_temp;
       osMessageQueuePut(TempQueueHandle, &current_temp, 0, 0);
       msg.value = current_temp;
       msg.timestamp = xTaskGetTickCount();
@@ -181,38 +184,57 @@ void StartPHSensorTask(void *argument)
 
 void StartECSensorTask(void *argument)
 {
-  SensorMsg_t msg;
-  msg.type = SENSOR_TYPE_EC;
-  EC_Sensor_Init();
-  for(;;) {
-    float val = EC_Sensor_Read(&hadc1);
-    if (val >= 0.0f) {
-      msg.value = val;
-      msg.timestamp = xTaskGetTickCount();
-      osMessageQueuePut(SensorDataQueueHandle, &msg, 0, 0);
+    SensorMsg_t msg;
+    msg.type = SENSOR_TYPE_EC;
+    EC_Sensor_Init();
+
+    extern volatile float g_current_temperature;
+
+    for(;;)
+    {
+        float val = EC_Sensor_Read(&hadc1, g_current_temperature);
+        if (val >= 0.0f)
+        {
+            msg.value = val;
+            msg.timestamp = xTaskGetTickCount();
+            osMessageQueuePut(SensorDataQueueHandle, &msg, 0, 0);
+        }
+        osDelay(2000);
     }
-    osDelay(2000);
-  }
 }
 
 void StartTurbiditySensorTask(void *argument)
 {
-  SensorMsg_t msg;
-  msg.type = SENSOR_TYPE_TURBIDITY;
-  for(;;) {
-    float adc_voltage = Read_Turbidity_Voltage();
-    if (adc_voltage >= 0.0f) {
-      float sensor_voltage = adc_voltage * 1.47f;
-      float ntu = (-1120.4f * sensor_voltage * sensor_voltage) + (5742.3f * sensor_voltage) - 4352.9f;
-      if (ntu < 0.0f) ntu = 0.0f;
-      msg.value = ntu;
-      msg.timestamp = xTaskGetTickCount();
-      osMessageQueuePut(SensorDataQueueHandle, &msg, 0, 0);
-    }
-    osDelay(2000);
-  }
-}
+    SensorMsg_t msg;
+    msg.type = SENSOR_TYPE_TURBIDITY;
 
+    for(;;)
+    {
+        // Read raw ADC on PA0
+        ADC_ChannelConfTypeDef sConfig = {0};
+        sConfig.Channel = ADC_CHANNEL_0;
+        sConfig.Rank = 1;
+        sConfig.SamplingTime = ADC_SAMPLETIME_56CYCLES;
+        HAL_ADC_ConfigChannel(&hadc1, &sConfig);
+        HAL_ADC_Start(&hadc1);
+        HAL_ADC_PollForConversion(&hadc1, 100);
+        uint32_t raw = HAL_ADC_GetValue(&hadc1);
+        HAL_ADC_Stop(&hadc1);
+
+        // Two-point calibration:
+        //   Filtered water (clear): raw ~3450 -> 0 NTU
+        //   Milky water:            raw  ~820 -> 2400 NTU
+        float ntu = ((float)raw * -0.9126f) + 3148.5f;
+        if (ntu < 0.0f)    ntu = 0.0f;
+        if (ntu > 3000.0f) ntu = 3000.0f;
+
+        msg.value = ntu;
+        msg.timestamp = xTaskGetTickCount();
+        osMessageQueuePut(SensorDataQueueHandle, &msg, 0, 0);
+
+        osDelay(2000);
+    }
+}
 void StartThermalTaskTask(void *argument)
 {
   float received_temp = 0.0f;
@@ -235,194 +257,240 @@ void StartThermalTaskTask(void *argument)
 
 void StartCommsTask(void *argument)
 {
-  SensorMsg_t rx_msg;
-  SystemTelemetry_t telemetry_cache = {
-      .temp_c = 0.0f, .water_level_cm = 0.0f, .turbidity_ntu = 0.0f,
-      .ph_val = 7.0f, .ec_val = 1.2f
-  };
+	 SensorMsg_t rx_msg;
+	  SystemTelemetry_t telemetry_cache = {
+	      .temp_c = 0.0f, .water_level_cm = 0.0f, .turbidity_ntu = 0.0f,
+	      .ph_val = 7.0f, .ec_val = 1.2f
+	  };
 
-  uint8_t last_batt_state = 0xFF;
-  uint8_t rx_token = 0;
-  static char report_buf[512];
-  static char warnings_buf[128];
-  uint32_t last_tx_tick = 0;
+	  uint8_t last_batt_state = 0xFF;
+	  uint8_t rx_token = 0;
+	  static char report_buf[512];
+	  static char warnings_buf[128];
+	  uint32_t last_tx_tick = 0;
 
-  uint8_t fish_fed_today = 0;
-  static char last_fed_time[20] = "Never";
-  static char fish_activity[12] = "Normal";
-  uint8_t batt_power = 0;
-  uint8_t lora_online = LoRa_Init();
-  uint8_t tx_status = 0;
+	  uint8_t fish_fed_today = 0;
+	  static char last_fed_time[20] = "Never";
+	  static char fish_activity[12] = "Normal";
+	  uint8_t batt_power = 0;
+	  uint8_t lora_online = LoRa_Init();
+	  uint8_t tx_status = 0;
 
-  if (lora_online) Downlink_ArmRx();
+	  /* ---- Feeding policy state ---- */
+	  #define HUNGRY_PERSIST_COUNT   3
+	  #define MIN_FEED_INTERVAL_MS   (4UL * 60UL * 60UL * 1000UL)   /* 4 hours */
+	  #define FEED_COOLDOWN_MS       (30UL * 60UL * 1000UL)         /* 30 min */
+	  #define MAX_FEEDS_PER_DAY      3
+	  #define DAY_MS                 (24UL * 60UL * 60UL * 1000UL)
 
-  ESP32_Init();
+	  uint8_t  hungry_streak    = 0;
+	  uint32_t last_feed_tick   = 0;
+	  uint32_t last_day_tick    = xTaskGetTickCount();
+	  uint8_t  feeds_today      = 0;
+
+	  if (lora_online) Downlink_ArmRx();
+	  ESP32_Init();
 
   for(;;)
   {
-    batt_power = (HAL_GPIO_ReadPin(PowerCheck_GPIO_Port, PowerCheck_Pin) == GPIO_PIN_RESET) ? 1 : 0;
+	  uint32_t now = xTaskGetTickCount();
 
-    if (batt_power != last_batt_state)
-    {
-      last_batt_state = batt_power;
-      if (batt_power == 1) {
-        uint8_t sleep_token = 0xAA;
-        HAL_UART_Transmit(&huart1, &sleep_token, 1, 50);
-        if (lora_online) LoRa_Sleep();
-      } else {
-        uint8_t wake_token = 0x55;
-        HAL_UART_Transmit(&huart1, &wake_token, 1, 50);
-        if (lora_online) Downlink_ArmRx();
-      }
-    }
+	      /* Reset daily counter every 24 h */
+	      if ((now - last_day_tick) >= DAY_MS) {
+	        last_day_tick = now;
+	        feeds_today = 0;
+	        fish_fed_today = 0;
+	      }
 
-    if (ESP32_ReadToken(&rx_token, 20))
-    {
-      switch (rx_token) {
-        case TOKEN_HUNGRY:
-          fish_fed_today = 1;
-          snprintf(last_fed_time, sizeof(last_fed_time), "%lu sec ago", (xTaskGetTickCount() / 1000));
-          snprintf(fish_activity, sizeof(fish_activity), "Feeding");
-          break;
-        case TOKEN_ANOMALY:
-          snprintf(fish_activity, sizeof(fish_activity), "Abnormal");
-          break;
-        case TOKEN_NORMAL:
-        default:
-          snprintf(fish_activity, sizeof(fish_activity), "Normal");
-          break;
-      }
-      rx_token = 0;
-    }
+	      batt_power = (HAL_GPIO_ReadPin(PowerCheck_GPIO_Port, PowerCheck_Pin) == GPIO_PIN_RESET) ? 1 : 0;
 
-    while (osMessageQueueGet(SensorDataQueueHandle, &rx_msg, NULL, 0) == osOK)
-    {
-      switch (rx_msg.type) {
-        case SENSOR_TYPE_TEMP:      telemetry_cache.temp_c         = rx_msg.value; break;
-        case SENSOR_TYPE_WATER_LVL: telemetry_cache.water_level_cm = rx_msg.value; break;
-        case SENSOR_TYPE_TURBIDITY: telemetry_cache.turbidity_ntu  = rx_msg.value; break;
-        case SENSOR_TYPE_PH:        telemetry_cache.ph_val         = rx_msg.value; break;
-        case SENSOR_TYPE_EC:        telemetry_cache.ec_val         = rx_msg.value; break;
-        default: break;
-      }
-    }
+	      if (batt_power != last_batt_state)
+	      {
+	        last_batt_state = batt_power;
+	        if (batt_power == 1) {
+	          uint8_t sleep_token = 0xAA;
+	          HAL_UART_Transmit(&huart1, &sleep_token, 1, 50);
+	          if (lora_online) LoRa_Sleep();
+	        } else {
+	          uint8_t wake_token = 0x55;
+	          HAL_UART_Transmit(&huart1, &wake_token, 1, 50);
+	          if (lora_online) Downlink_ArmRx();
+	        }
+	      }
 
-    if (lora_online && batt_power == 0) {
-      Downlink_Poll();
-      }
+	      /* Only honour vision tokens while on mains power */
+	      if (batt_power == 0 && ESP32_ReadToken(&rx_token, 20))
+	      {
+	        switch (rx_token) {
+	          case TOKEN_HUNGRY:
+	          {
+	            hungry_streak++;
 
+	            if (hungry_streak >= HUNGRY_PERSIST_COUNT) {
+	              uint32_t since_last = (last_feed_tick == 0)
+	                                    ? MIN_FEED_INTERVAL_MS
+	                                    : (now - last_feed_tick);
+	              uint8_t  cooldown_ok = (last_feed_tick == 0) ||
+	                                     ((now - last_feed_tick) >= FEED_COOLDOWN_MS);
 
-    if ((xTaskGetTickCount() - last_tx_tick) >= pdMS_TO_TICKS(1000))
-    {
-      last_tx_tick = xTaskGetTickCount();
-      tx_status = 0;
+	              if (since_last >= MIN_FEED_INTERVAL_MS &&
+	                  feeds_today < MAX_FEEDS_PER_DAY &&
+	                  cooldown_ok)
+	              {
+	                last_feed_tick = now;
+	                feeds_today++;
+	                hungry_streak = 0;
+	                fish_fed_today = 1;
 
-      if (lora_online && batt_power == 0)
-      {
-        static char lora_pkt[220];
-        int lora_len = snprintf(lora_pkt, sizeof(lora_pkt),
-            "========================\r\n"
-            "   AQUAPONICS UPDATE\r\n"
-            "========================\r\n"
-            "Power : %s\r\n"
-            "Temp  : %.1f C\r\n"
-            "Water : %.1f cm\r\n"
-            "pH    : %.2f\r\n"
-            "EC    : %.2f mS/cm\r\n"
-            "NTU   : %.0f\r\n"
-            "Fish  : %s\r\n"
-            "========================\r\n",
-            (batt_power == 0) ? "Mains" : "BATT",
-            telemetry_cache.temp_c, telemetry_cache.water_level_cm,
-            telemetry_cache.ph_val, telemetry_cache.ec_val,
-            telemetry_cache.turbidity_ntu, fish_activity);
+	                snprintf(last_fed_time, sizeof(last_fed_time), "%lu sec ago", (now / 1000));
+	                snprintf(fish_activity, sizeof(fish_activity), "Feeding");
 
-        if (lora_len < 0) lora_len = 0;
-        else if (lora_len >= (int)sizeof(lora_pkt)) lora_len = sizeof(lora_pkt) - 1;
+	                xTaskNotify((TaskHandle_t)ServoHandle, 0x01, eSetBits);
+	                Pump_Send_Event(PUMP_EVT_FISH_FED);
+	              }
+	            }
+	            break;
+	          }
+	          case TOKEN_ANOMALY:
+	            hungry_streak = 0;
+	            snprintf(fish_activity, sizeof(fish_activity), "Abnormal");
+	            break;
+	          case TOKEN_NORMAL:
+	          default:
+	            hungry_streak = 0;
+	            snprintf(fish_activity, sizeof(fish_activity), "Normal");
+	            break;
+	        }
+	        rx_token = 0;
+	      }
 
-        tx_status = LoRa_Transmit((uint8_t*)lora_pkt, lora_len);
-        Downlink_ArmRx();
-      }
+	      while (osMessageQueueGet(SensorDataQueueHandle, &rx_msg, NULL, 0) == osOK)
+	      {
+	        switch (rx_msg.type) {
+	          case SENSOR_TYPE_TEMP:      telemetry_cache.temp_c         = rx_msg.value; break;
+	          case SENSOR_TYPE_WATER_LVL: telemetry_cache.water_level_cm = rx_msg.value; break;
+	          case SENSOR_TYPE_TURBIDITY: telemetry_cache.turbidity_ntu  = rx_msg.value; break;
+	          case SENSOR_TYPE_PH:        telemetry_cache.ph_val         = rx_msg.value; break;
+	          case SENSOR_TYPE_EC:        telemetry_cache.ec_val         = rx_msg.value; break;
+	          default: break;
+	        }
+	      }
 
-      uint8_t pwr_sync = (batt_power == 1) ? 0xAA : 0x55;
-      HAL_UART_Transmit(&huart1, &pwr_sync, 1, 20);
+	      if (lora_online && batt_power == 0) {
+	        Downlink_Poll();
+	      }
 
-      warnings_buf[0] = '\0';
-      if (batt_power == 1)                                                strcat(warnings_buf, "BATTERY POWER ACTIVE; ");
-      if (telemetry_cache.water_level_cm < 10.0f && telemetry_cache.water_level_cm > 0.0f)
-                                                                          strcat(warnings_buf, "Low Water LVL; ");
-      if (telemetry_cache.temp_c <= -900.0f || telemetry_cache.temp_c > 45.0f)
-                                                                          strcat(warnings_buf, "CHECK Temp Sensor; ");
-      if (telemetry_cache.ph_val < 5.5f || telemetry_cache.ph_val > 8.5f)
-                                                                          strcat(warnings_buf, "CHECK pH Sensor; ");
-      if (telemetry_cache.ec_val < 0.2f || telemetry_cache.ec_val > 3.0f)
-                                                                          strcat(warnings_buf, "CHECK EC Sensor; ");
-      if (telemetry_cache.turbidity_ntu > 100.0f)                         strcat(warnings_buf, "CHECK Turbidity Sensor; ");
-      if (strlen(warnings_buf) == 0)                                      strcpy(warnings_buf, "None");
+	      if ((now - last_tx_tick) >= pdMS_TO_TICKS(1000))
+	      {
+	        last_tx_tick = now;
+	        tx_status = 0;
 
-      char lora_hw_stat[32];
-      if (!lora_online)                     strcpy(lora_hw_stat, "SPI2 Init FAILED (0x00)");
-      else if (batt_power == 1)             strcpy(lora_hw_stat, "Asleep (Battery Save)");
-      else if (tx_status == 1)              strcpy(lora_hw_stat, "Transmitted (OK)");
-      else                                  strcpy(lora_hw_stat, "TX Timeout");
+	        if (lora_online && batt_power == 0)
+	        {
+	          static char lora_pkt[220];
+	          int lora_len = snprintf(lora_pkt, sizeof(lora_pkt),
+	              "========================\r\n"
+	              "   AQUAPONICS UPDATE\r\n"
+	              "========================\r\n"
+	              "Power : %s\r\n"
+	              "Temp  : %.1f C\r\n"
+	              "Water : %.1f cm\r\n"
+	              "pH    : %.2f\r\n"
+	              "EC    : %.2f mS/cm\r\n"
+	              "NTU   : %.0f\r\n"
+	              "Fish  : %s\r\n"
+	              "========================\r\n",
+	              (batt_power == 0) ? "Mains" : "BATT",
+	              telemetry_cache.temp_c, telemetry_cache.water_level_cm,
+	              telemetry_cache.ph_val, telemetry_cache.ec_val,
+	              telemetry_cache.turbidity_ntu, fish_activity);
 
-      int len = snprintf(report_buf, sizeof(report_buf),
-          "\r\n_Aquaponic_System_Info_\r\n\r\n"
-          "PowerStatus: %s\r\n"
-          "Warnings: %s\r\n"
-          "___Sensors___\r\n"
-          "Temperature: %.2f C\r\n"
-          "WaterLvl: %.2f cm\r\n"
-          "PH: %.2f pH\r\n"
-          "EC: %.2f mS/cm\r\n"
-          "Turbidity: %.2f NTU\r\n\r\n"
-          "___Comms_Activity___\r\n"
-          "Camera: %s\r\n"
-          "LoRa Radio: %s\r\n"
-          "Fish_Activity: %s\r\n"
-          "Fish Fed Today: %s\r\n"
-          "Last Fed: %s\r\n"
-          "Pumps: %u%%\r\n\r\n",
-          (batt_power == 0) ? "Mains" : "BATTERY",
-          warnings_buf,
-          telemetry_cache.temp_c, telemetry_cache.water_level_cm,
-          telemetry_cache.ph_val, telemetry_cache.ec_val,
-          telemetry_cache.turbidity_ntu,
-          (batt_power == 0) ? "Online" : "Sleep",
-          lora_hw_stat,
-          fish_activity,
-          (fish_fed_today == 1) ? "Yes" : "No",
-          last_fed_time,
-          (unsigned)g_pump_speed_percent);
+	          if (lora_len < 0) lora_len = 0;
+	          else if (lora_len >= (int)sizeof(lora_pkt)) lora_len = sizeof(lora_pkt) - 1;
 
-      CDC_Transmit_FS((uint8_t*)report_buf, len);
-    }
+	          tx_status = LoRa_Transmit((uint8_t*)lora_pkt, lora_len);
+	          Downlink_ArmRx();
+	        }
 
-    osDelay(50);
+	        uint8_t pwr_sync = (batt_power == 1) ? 0xAA : 0x55;
+	        HAL_UART_Transmit(&huart1, &pwr_sync, 1, 20);
+
+	        warnings_buf[0] = '\0';
+	        if (batt_power == 1)                                                strcat(warnings_buf, "BATTERY POWER ACTIVE; ");
+	        if (telemetry_cache.water_level_cm < 10.0f && telemetry_cache.water_level_cm > 0.0f)
+	                                                                            strcat(warnings_buf, "Low Water LVL; ");
+	        if (telemetry_cache.temp_c <= -900.0f || telemetry_cache.temp_c > 45.0f)
+	                                                                            strcat(warnings_buf, "CHECK Temp Sensor; ");
+	        if (telemetry_cache.ph_val < 5.5f || telemetry_cache.ph_val > 8.5f)
+	                                                                            strcat(warnings_buf, "CHECK pH Sensor; ");
+	        if (telemetry_cache.ec_val < 0.2f || telemetry_cache.ec_val > 3.0f)
+	                                                                            strcat(warnings_buf, "CHECK EC Sensor; ");
+	        if (telemetry_cache.turbidity_ntu > 100.0f)                         strcat(warnings_buf, "CHECK Turbidity Sensor; ");
+	        if (strlen(warnings_buf) == 0)                                      strcpy(warnings_buf, "None");
+
+	        char lora_hw_stat[32];
+	        if (!lora_online)                     strcpy(lora_hw_stat, "SPI2 Init FAILED (0x00)");
+	        else if (batt_power == 1)             strcpy(lora_hw_stat, "Asleep (Battery Save)");
+	        else if (tx_status == 1)              strcpy(lora_hw_stat, "Transmitted (OK)");
+	        else                                  strcpy(lora_hw_stat, "TX Timeout");
+
+	        int len = snprintf(report_buf, sizeof(report_buf),
+	            "\r\n_Aquaponic_System_Info_\r\n\r\n"
+	            "PowerStatus: %s\r\n"
+	            "Warnings: %s\r\n"
+	            "___Sensors___\r\n"
+	            "Temperature: %.2f C\r\n"
+	            "WaterLvl: %.2f cm\r\n"
+	            "PH: %.2f pH\r\n"
+	            "EC: %.2f mS/cm\r\n"
+	            "Turbidity: %.2f NTU\r\n\r\n"
+	            "___Comms_Activity___\r\n"
+	            "Camera: %s\r\n"
+	            "LoRa Radio: %s\r\n"
+	            "Fish_Activity: %s\r\n"
+	            "Fish Fed Today: %s\r\n"
+	            "Last Fed: %s\r\n"
+	            "Feeds Today: %u\r\n"
+	            "Pumps: %u%%\r\n\r\n",
+	            (batt_power == 0) ? "Mains" : "BATTERY",
+	            warnings_buf,
+	            telemetry_cache.temp_c, telemetry_cache.water_level_cm,
+	            telemetry_cache.ph_val, telemetry_cache.ec_val,
+	            telemetry_cache.turbidity_ntu,
+	            (batt_power == 0) ? "Online" : "Sleep",
+	            lora_hw_stat,
+	            fish_activity,
+	            (fish_fed_today == 1) ? "Yes" : "No",
+	            last_fed_time,
+	            (unsigned)feeds_today,
+	            (unsigned)g_pump_speed_percent);
+
+	        CDC_Transmit_FS((uint8_t*)report_buf, len);
+	      }
+
+	      osDelay(50);
   }
 }
 
 void StartServoTask(void *argument)
 {
-	Servo_Init();
-
-	  /* Boot: 180 degrees clockwise to reference the paddle.
-	   * This runs once when the system powers up. */
-	  Servo_Rotate_For(BOOT_SPEED, BOOT_ROTATE_MS);
+	  Servo_Init();
+	  Servo_BootAlign();
 	  osDelay(200);
 
 	  uint32_t notify_val = 0;
-  for(;;) {
-	  if (xTaskNotifyWait(0x00, 0xFFFFFFFF, &notify_val, portMAX_DELAY) != pdTRUE) {
-	       continue;
-	     }
+	  for(;;) {
+	    if (xTaskNotifyWait(0x00, 0xFFFFFFFF, &notify_val, portMAX_DELAY) != pdTRUE) {
+	      continue;
+	    }
 
-	     if (notify_val & 0x01) {
-	       /* Every feed: 90 degrees clockwise. No reversal, ever. */
-	       Servo_Rotate_For(FEED_SPEED, FEED_ROTATE_MS);
-	     }
+	    if (notify_val & 0x01) {
+	      Servo_Feed();
+	      /* Drain any duplicate notify bits that queued during the feed */
+	      ulTaskNotifyTake(pdTRUE, 0);
+	    }
 
-	     notify_val = 0;
+	    notify_val = 0;
   }
 }
 
@@ -432,6 +500,7 @@ void StartPumpTask(void *argument)
   PumpState_t current_state = PUMP_STATE_NORMAL;
 
   const uint32_t FIVE_MINUTES_TICKS = pdMS_TO_TICKS(5 * 60 * 1000);
+
   uint32_t state_entry_tick = xTaskGetTickCount();
   uint8_t is_manual_override = 0;
   uint8_t in_feeding_cycle = 0;
@@ -443,26 +512,32 @@ void StartPumpTask(void *argument)
       state_entry_tick = xTaskGetTickCount();
       switch (rx_event) {
         case PUMP_EVT_FISH_FED:
-        	if (!is_manual_override) {
-        	        current_state = PUMP_STATE_HIGH;
-        	        Pump_Set_Speed(100);
-        	        in_feeding_cycle = 1;
-        	    }
-        	    break;
-        case PUMP_EVT_OVERRIDE_HIGH: current_state = PUMP_STATE_HIGH;
-				Pump_Set_Speed(100); is_manual_override = 1;
-				in_feeding_cycle = 0;
-				break;
-        case PUMP_EVT_OVERRIDE_MED:  current_state = PUMP_STATE_MEDIUM;
-				Pump_Set_Speed(80);  is_manual_override = 1;
-				in_feeding_cycle = 0;
-				break;
-        case PUMP_EVT_OVERRIDE_LOW:  current_state = PUMP_STATE_NORMAL;
-				Pump_Set_Speed(60);  is_manual_override = 1;
-				in_feeding_cycle = 0;
-				break;
+          if (!is_manual_override) {
+            current_state = PUMP_STATE_HIGH;
+            Pump_Set_Speed(100);
+            in_feeding_cycle = 1;
+          }
+          break;
+        case PUMP_EVT_OVERRIDE_HIGH:
+          current_state = PUMP_STATE_HIGH;
+          Pump_Set_Speed(100);
+          is_manual_override = 1;
+          in_feeding_cycle = 0;
+          break;
+        case PUMP_EVT_OVERRIDE_MED:
+          current_state = PUMP_STATE_MEDIUM;
+          Pump_Set_Speed(80);
+          is_manual_override = 1;
+          in_feeding_cycle = 0;
+          break;
+        case PUMP_EVT_OVERRIDE_LOW:
+          current_state = PUMP_STATE_NORMAL;
+          Pump_Set_Speed(66);
+          is_manual_override = 1;
+          in_feeding_cycle = 0;
+          break;
         default:
-        		break;
+          break;
       }
     }
 
@@ -470,15 +545,21 @@ void StartPumpTask(void *argument)
 
     if (in_feeding_cycle) {
       if (current_state == PUMP_STATE_HIGH && elapsed >= FIVE_MINUTES_TICKS) {
-        current_state = PUMP_STATE_MEDIUM; Pump_Set_Speed(80); state_entry_tick = xTaskGetTickCount();
+        current_state = PUMP_STATE_MEDIUM;
+        Pump_Set_Speed(80);
+        state_entry_tick = xTaskGetTickCount();
       } else if (current_state == PUMP_STATE_MEDIUM && elapsed >= FIVE_MINUTES_TICKS) {
-        current_state = PUMP_STATE_NORMAL; Pump_Set_Speed(60); in_feeding_cycle = 0;
+        current_state = PUMP_STATE_NORMAL;
+        Pump_Set_Speed(66);
+        in_feeding_cycle = 0;
       }
     }
 
     if (is_manual_override) {
       if (elapsed >= FIVE_MINUTES_TICKS) {
-        current_state = PUMP_STATE_NORMAL; Pump_Set_Speed(60); is_manual_override = 0;
+        current_state = PUMP_STATE_NORMAL;
+        Pump_Set_Speed(66);
+        is_manual_override = 0;
       }
     }
   }

@@ -32,7 +32,7 @@ float pH_Sensor_Read(ADC_HandleTypeDef *hadc)
 
         // DFRobot V2 linear conversion formula: pH = 3.5 * Voltage
         float phValue = 3.5f * voltage;
-
+        phValue = phValue + 2.85f;  // offset correction: 7.8 buffer reads 4.95, so add 2.85
         return phValue;
     }
 

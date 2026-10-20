@@ -26,6 +26,6 @@ float Read_Water_Level_CM(void) {
         if (local_time > 30000) break;
     }
 
-    float distance_cm = (float)local_time * 0.034f / 2.0f;
+    float distance_cm = (float)local_time * 0.0034f / 2.0f;
     return distance_cm;
 }

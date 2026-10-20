@@ -3,8 +3,10 @@
 
 #include "main.h"
 
-// Public function prototypes to control the fish feeder servo angle (0 to 180 degrees)
 void Servo_Init(void);
-void Servo_Set_Angle(uint8_t angle);
+void Servo_Set_Pulse(uint32_t pulse_us);
+void Servo_Rotate_For_Pulse(uint32_t pulse_us, uint32_t ms);
+void Servo_Feed(void);
+void Servo_BootAlign(void);
 
-#endif /* SERVO_MOTOR_H */
+#endif
