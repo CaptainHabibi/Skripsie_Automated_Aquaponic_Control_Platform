@@ -109,8 +109,8 @@ int main(void)
 
     // 1. Force the RTC Current Time to 00:00:00
     RTC_TimeTypeDef sTime = {0};
-    sTime.Hours = 0;
-    sTime.Minutes = 0;
+    sTime.Hours = 9;
+    sTime.Minutes = 59;
     sTime.Seconds = 0;
     sTime.DayLightSaving = RTC_DAYLIGHTSAVING_NONE;
     sTime.StoreOperation = RTC_STOREOPERATION_RESET;
@@ -118,9 +118,9 @@ int main(void)
 
     // 2. Set the Alarm to fire 5 seconds later (00:00:05)
     RTC_AlarmTypeDef sAlarm = {0};
-    sAlarm.AlarmTime.Hours = 0;
+    sAlarm.AlarmTime.Hours = 10;
     sAlarm.AlarmTime.Minutes = 0;
-    sAlarm.AlarmTime.Seconds = 20;
+    sAlarm.AlarmTime.Seconds = 0;
     sAlarm.AlarmTime.SubSeconds = 0;
     sAlarm.AlarmTime.DayLightSaving = RTC_DAYLIGHTSAVING_NONE;
     sAlarm.AlarmTime.StoreOperation = RTC_STOREOPERATION_RESET;
@@ -207,12 +207,7 @@ void SystemClock_Config(void)
 extern osThreadId_t ServoHandle;
 
 // Hardware RTC Alarm A Interrupt Callback (triggers once every 24 hours)
-void HAL_RTC_AlarmAEventCallback(RTC_HandleTypeDef *hrtc)
-{
-    BaseType_t xHigherPriorityTaskWoken = pdFALSE;
-    xTaskNotifyFromISR((TaskHandle_t)ServoHandle, 0x01, eSetBits, &xHigherPriorityTaskWoken);
-    portYIELD_FROM_ISR(xHigherPriorityTaskWoken);
-}
+
 /* USER CODE END 4 */
 
 /**

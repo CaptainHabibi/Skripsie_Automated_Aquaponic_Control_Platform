@@ -27,7 +27,7 @@ const uint8_t  CMD_PUMP_MED    = 0xC3;
 const uint8_t  CMD_PUMP_LOW    = 0xC4;
 
 const uint16_t RING_SIZE = 20;
-const uint8_t  MOVAVG_WINDOW = 5;
+const uint8_t  MOVAVG_WINDOW = 15;
 
 const uint32_t TX_MIN_GAP_MS     = 800;
 const uint32_t MANUAL_TIMEOUT_MS = 15000;

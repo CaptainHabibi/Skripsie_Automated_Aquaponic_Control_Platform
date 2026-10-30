@@ -7,7 +7,7 @@
 /* Behavioral Tokens matching ESP32-S3 definitions */
 #define TOKEN_NORMAL      0x01
 #define TOKEN_HUNGRY      0x02
-#define TOKEN_ANOMALY     0x03
+#define TOKEN_NIGHT     0x03
 
 /* STM32 Downstream Request Commands */
 #define CMD_TRIGGER_AI    'C'
