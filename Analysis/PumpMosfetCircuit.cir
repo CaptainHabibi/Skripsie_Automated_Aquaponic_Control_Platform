@@ -1,0 +1,34 @@
+Pump_MosfetCircuit
+
+Vsq GPIO gnd PULSE(0 3.3 0 1n 1n 37.78u 111.11u)
+VDC pow gnd 5 DC
+R1 pow gates 680
+R2 GPIO base 1k
+Q1 gates base gnd 2N3904
+M1 drains gates gnd 2N7000
+M2 drains gates gnd 2N7000
+M3 drains gates gnd 2N7000
+D1 drains pow DI_1N4007
+L1 drains 1 1m
+R3 1 pow 27.78
+C1 pow drains 100n
+
+
+.MODEL DI_1N4007 D  ( IS=76.9p RS=42.0m BV=1.00k IBV=5.00u
++ CJO=26.5p  M=0.333 N=1.45 TT=4.32u )
+*M1  drain  gate  source  2N7000
+.model 2N7000 VDMOS(Rg=3 Vto=3 Rd=0 Rs=.75 Rb=.14 Kp=.17 mtriode=1.25 Cgdmax=80p Cgdmin=12p Cgs=50p Cjo=50p Is=.04p mfg=Fairchild Vds=60 Ron=5 Qg=.223n)   
+.model 2N3904 NPN(Is=6.734f Xti=3 Eg=1.11 Vaf=74.03 Bf=416.4 Ne=1.259
++ Ise=6.734f Ikf=66.78m Xtb=1.5 Br=.7371 Nc=2 Isc=0 Ikr=0 Rc=1
++ Cjc=3.638p Mjc=.3085 Vjc=.75 Fc=.5 Cje=4.493p Mje=.2593 Vje=.75
++ Tr=239.5n Tf=301.2p Itf=.4 Vtf=4 Xtf=2 Rb=10)
+
+
+.tran 1u 2m
+.control
+run
+plot v(pow,drains) v(GPIO)
+* or to see them on separate axes:
+* plot v(1,pow)
+* plot v(GPIO)
+.endc
